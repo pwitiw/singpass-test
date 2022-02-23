@@ -18,6 +18,7 @@ import java.nio.file.Paths;
 import java.security.*;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Random;
 import java.util.UUID;
 import java.util.stream.StreamSupport;
 
@@ -66,63 +67,22 @@ class SingpassAccessTokenRequestBody {
 @Builder
 @ToString
 class SingpassAuthHeader {
-    private final String timestamp;
-    private final String nonce;
+    private final long timestamp;
+    private final long nonce;
     private final String appId;
     private final String signatureMethod;
     private final String signature;
 
     String toJson() {
         return "PKI_SIGN " +
-                "app_id=\"" + appId +
+                "timestamp=\"" + timestamp +
                 "\",nonce=\"" + nonce +
+                "\",app_id=\"" + appId +
                 "\",signature_method=\"" + signatureMethod +
                 "\",signature=\"" + signature +
-                "\",timestamp=\"" + timestamp +
                 "\"";
     }
 }
-
-@RequiredArgsConstructor
-@Getter
-@Builder
-@ToString
-class RequestDetails {
-    private final String method;
-    private final String url;
-    private final String appId;
-    private final String attributes;
-    private final String clientId;
-    private final String clientSecret;
-    private final String code;
-    private final String grantType;
-    private final String nonce;
-    private final String redirectUri;
-    private final String state;
-    private final String timestamp;
-
-//    String compose() {
-//        var result = new StringBuilder()
-//                .append(method)
-//                .append(url)
-//                .append("app_id=").append(appId);
-//        if (attributes != null) {
-//            result.append("attributes=").append(attributes);
-//        }
-//        result.
-//        return "PKI_SIGN timestamp=\"" + timestamp +
-//                "\",nonce=\"" + nonce +
-//                "\",app_id=\"" + appId +
-//                "\",signature_method=\"" + signatureMethod +
-//                "\",signature=\"" + signature +
-//                "\"";
-//    }
-}
-//        return method + "&" + url + "&app_id=STG2-SGVERIFY-SELF-TEST&client_id=STG2-SGVERIFY-SELF-TEST&client_secret=WnBdUYAftjB8gLt4cjl1N01XulG1q7fn&code=0b43b47773205a7779d5a572fd3ae841820a8eaa&grant_typ" +
-//                "e=authorization_code&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&state=" + state + "&timestamp=" + timestamp;
-//        return "GET&https://test.api.myinfo.gov.sg/sgverify/v2/person/" + uuid + "&app_id=STG2-SGVERIFY-SELF-TEST&attributes=" + attributes + "&client_id=STG2-SGVERIFY-SELF-TEST" +
-//                "&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&state=" + state + "&timestamp=" + timestamp;
-
 
 @RestController
 @RequiredArgsConstructor
@@ -145,7 +105,7 @@ class Orrr {
                 .client_secret("WnBdUYAftjB8gLt4cjl1N01XulG1q7fn")
                 .build();
 
-        var authorizationHeaderApiCall = createPostAuthHeader(state, code).toJson();
+        var authorizationHeaderApiCall = createPostAuthHeader(code).toJson();
 
         OkHttpClient client = new OkHttpClient.Builder()
                 .build();
@@ -177,7 +137,7 @@ class Orrr {
                 .url(fullPath)
                 .get()
                 .header("Cache-Control", "no-cache")
-                .header("Authorization", createGetAuthHeader(url, state, attributes).toJson() + ",Bearer " + singpassResponse.getAccessToken())
+                .header("Authorization", createGetAuthHeader(url, attributes).toJson() + ",Bearer " + singpassResponse.getAccessToken())
                 .build();
         Response userDataResponse = client.newCall(requestUserDetails).execute();
         var userData = userDataResponse.body().string();
@@ -191,21 +151,13 @@ class Orrr {
                 .orElse("");
     }
 
-    private static SingpassAuthHeader createGetAuthHeader(String url, String state, String attributes) throws Exception {
-        String nonce = UUID.randomUUID().toString();
-        String timestamp = String.valueOf(Instant.now().toEpochMilli());
-        PrivateKey privateKey = loadPrivateKey();
+    private static SingpassAuthHeader createGetAuthHeader(String url, String attributes) throws Exception {
+        Random rand = SecureRandom.getInstance ("SHA1PRNG");
+        long nonce = rand.nextLong();
+        long timestamp = System.currentTimeMillis();
 
-        byte[] data = generateBaseStringGet(url, nonce, timestamp, state, attributes).getBytes("UTF8");
-
-        Signature sig = Signature.getInstance("SHA256withRSA");
-        sig.initSign(privateKey);
-        sig.update(data);
-        byte[] digitalSignature = sig.sign();
-        Files.writeString(Paths.get("digital_signature_2"), new String(digitalSignature));
-        String signature = new String(Base64.getEncoder().encode(digitalSignature));
-//        sig.initVerify(privateKey.getPublic());
-//        sig.update(data);
+        var baseString = generateBaseStringGet(url, nonce, timestamp, attributes);
+        String signature = sign(baseString);
 
         var authHeader = SingpassAuthHeader.builder()
                 .appId("STG2-SGVERIFY-SELF-TEST")
@@ -214,17 +166,16 @@ class Orrr {
                 .nonce(nonce)
                 .signature(signature)
                 .build();
-
-        System.out.println(sig.verify(digitalSignature));
         System.out.println(authHeader);
 
         return authHeader;
     }
 
-    private static SingpassAuthHeader createPostAuthHeader(String state, String code) throws Exception {
-        String nonce = UUID.randomUUID().toString();
-        String timestamp = String.valueOf(Instant.now().toEpochMilli());
-        String baseString = generateBaseStringPost(nonce, timestamp, state, code);
+    private static SingpassAuthHeader createPostAuthHeader(String code) throws Exception {
+        Random rand = SecureRandom.getInstance ("SHA1PRNG");
+        long nonce = rand.nextLong();
+        long timestamp = System.currentTimeMillis();
+        String baseString = generateBaseStringPost(nonce, timestamp, code);
         String signature = sign(baseString);
         System.out.println("BASE STRING: " + baseString);
         System.out.println("SIGNATURE: " + signature);
@@ -242,16 +193,11 @@ class Orrr {
     public static String sign(String baseString) throws Exception {
         PrivateKey privateKey = loadPrivateKey();
 
-        byte[] data = baseString.getBytes("UTF8");
-
         Signature sig = Signature.getInstance("SHA256withRSA");
         sig.initSign(privateKey);
-        sig.update(data);
-        byte[] digitalSignature = sig.sign();
-        Files.writeString(Paths.get("digital_signature_2"), new String(digitalSignature));
-        String signature = new String(Base64.getEncoder().encode(digitalSignature));
-//        sig.initVerify(privateKey);
-//        sig.update(data);
+        sig.update(baseString.getBytes());
+        byte[] signedData = sig.sign();
+        String signature = Base64.getEncoder().encodeToString(signedData);
         return signature;
     }
 
@@ -262,13 +208,13 @@ class Orrr {
         return (PrivateKey) keyStore.getKey("1", "DemoApp".toCharArray());
     }
 
-    private static String generateBaseStringPost(String nonce, String timestamp, String state, String code) {
+    private static String generateBaseStringPost(long nonce, long timestamp, String code) {
         return "POST&" + TOKEN_URL + "&app_id=STG2-SGVERIFY-SELF-TEST&client_id=STG2-SGVERIFY-SELF-TEST&client_secret=WnBdUYAftjB8gLt4cjl1N01XulG1q7fn&code="+code+"&grant_typ" +
-                "e=authorization_code&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&state=" + state + "&timestamp=" + timestamp;
+                "e=authorization_code&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&timestamp=" + timestamp;
     }
 
-    private static String generateBaseStringGet(String url, String nonce, String timestamp, String state, String attributes) {
+    private static String generateBaseStringGet(String url, long nonce, long timestamp, String attributes) {
         return "GET&" + url + "&app_id=STG2-SGVERIFY-SELF-TEST&attributes=" + attributes + "&client_id=STG2-SGVERIFY-SELF-TEST" +
-                "&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&state=" + state + "&timestamp=" + timestamp;
+                "&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&timestamp=" + timestamp;
     }
 }
