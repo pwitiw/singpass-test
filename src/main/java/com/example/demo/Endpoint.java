@@ -3,6 +3,9 @@ package com.example.demo;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.nimbusds.jose.crypto.RSADecrypter;
+import com.nimbusds.jwt.EncryptedJWT;
+import com.nimbusds.jwt.SignedJWT;
 import lombok.*;
 import okhttp3.*;
 import org.json.JSONArray;
@@ -13,10 +16,10 @@ import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.FileInputStream;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.security.*;
-import java.time.Instant;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.RSAPrivateKeySpec;
 import java.util.Base64;
 import java.util.Random;
 import java.util.UUID;
@@ -55,7 +58,8 @@ class SingpassAccessTokenRequestBody {
         return String.format("grant_type=%s&code=%s&redirect_uri=%s&client_id=%s&client_secret=%s&state=%s",
                 grant_type,
                 code,
-                redirect_uri,
+//                redirect_uri,
+                "http%3A%2F%2Flocalhost%3A3001%2Fcallback",
                 client_id,
                 client_secret,
                 state);
@@ -72,6 +76,7 @@ class SingpassAuthHeader {
     private final String appId;
     private final String signatureMethod;
     private final String signature;
+    private final String accessToken;
 
     String toJson() {
         return "PKI_SIGN " +
@@ -80,7 +85,7 @@ class SingpassAuthHeader {
                 "\",app_id=\"" + appId +
                 "\",signature_method=\"" + signatureMethod +
                 "\",signature=\"" + signature +
-                "\"";
+                "\",Bearer " + accessToken;
     }
 }
 
@@ -105,12 +110,11 @@ class Orrr {
                 .client_secret("WnBdUYAftjB8gLt4cjl1N01XulG1q7fn")
                 .build();
 
-        var authorizationHeaderApiCall = createPostAuthHeader(code).toJson();
-
+        var authorizationHeaderApiCall = createPostAuthHeader(code, state).toJson();
+        System.out.println("Header: " + authorizationHeaderApiCall);
         OkHttpClient client = new OkHttpClient.Builder()
                 .build();
-        var requestBody = okhttp3.RequestBody.create(singpassTokenRequestBody.postowe(), MediaType.parse("application/json"));
-        System.out.println("REQUEST BODY: " + singpassTokenRequestBody.postowe());
+        var requestBody = okhttp3.RequestBody.create(singpassTokenRequestBody.postowe(), MediaType.parse("application/x-www-form-urlencoded"));
         Request request = new Request.Builder()
                 .url(TOKEN_URL)
                 .post(requestBody)
@@ -124,39 +128,53 @@ class Orrr {
         var tokenResponseBody = response.body().string();
         var singpassResponse = objectMapper.readValue(tokenResponseBody, SingpassAccessTokenResponse.class);
 
-        var strParams = "client_id=" + singpassTokenRequestBody.getClient_id() +
-                "&attributes=partialuinfin,name,race,dob,mobileno,uuid" +
-                "&txnNo=" + "testTxn" + UUID.randomUUID().toString();
         var chunks = singpassResponse.getAccessToken().split("\\.");
         var payload = new String(Base64.getDecoder().decode(chunks[1]));
         var json = new JSONObject(payload);
-        String attributes = attributes(json.getJSONArray("scope"));
+        var attributes = attributes(json.getJSONArray("scope"));
+        var txnNo = UUID.randomUUID();
+        var strParams = "client_id=" + singpassTokenRequestBody.getClient_id() +
+                "&attributes=" + attributes +
+                "&txnNo=" + txnNo;
         var url = PERSON_URL + "/" + json.get("sub");
         var fullPath = url + "?" + strParams;
+
         Request requestUserDetails = new Request.Builder()
                 .url(fullPath)
                 .get()
                 .header("Cache-Control", "no-cache")
-                .header("Authorization", createGetAuthHeader(url, attributes).toJson() + ",Bearer " + singpassResponse.getAccessToken())
+                .header("Authorization", createGetAuthHeader(url, attributes, singpassResponse.getAccessToken(), txnNo).toJson())
                 .build();
         Response userDataResponse = client.newCall(requestUserDetails).execute();
-        var userData = userDataResponse.body().string();
-        return userData;
+        var encryptedUserData = userDataResponse.body().string();
+
+
+//        PrivateKey privateKey = loadPrivateKey();
+//        KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+//        RSAPrivateKeySpec privateKeySpec = keyFactory.getKeySpec(privateKey, RSAPrivateKeySpec.class);
+//
+//        RSAPrivateKey privateRsaKey = (RSAPrivateKey) keyFactory.generatePrivate(privateKeySpec);
+//
+//
+//        EncryptedJWT jwt = EncryptedJWT.parse(encryptedUserData);
+//        RSADecrypter decrypter = new RSADecrypter(privateRsaKey);
+//        jwt.decrypt(decrypter);
+        return encryptedUserData;
     }
 
     private String attributes(JSONArray scope) {
         return StreamSupport.stream(scope.spliterator(), false)
                 .map(String::valueOf)
-                .reduce((a, b) -> a + "s" + b)
+                .reduce((a, b) -> a + "," + b)
                 .orElse("");
     }
 
-    private static SingpassAuthHeader createGetAuthHeader(String url, String attributes) throws Exception {
-        Random rand = SecureRandom.getInstance ("SHA1PRNG");
+    private static SingpassAuthHeader createGetAuthHeader(String url, String attributes, String accessToken, UUID txnNo) throws Exception {
+        Random rand = SecureRandom.getInstance("SHA1PRNG");
         long nonce = rand.nextLong();
         long timestamp = System.currentTimeMillis();
 
-        var baseString = generateBaseStringGet(url, nonce, timestamp, attributes);
+        var baseString = generateBaseStringGet(url, nonce, timestamp, attributes, txnNo);
         String signature = sign(baseString);
 
         var authHeader = SingpassAuthHeader.builder()
@@ -165,20 +183,20 @@ class Orrr {
                 .timestamp(timestamp)
                 .nonce(nonce)
                 .signature(signature)
+                .accessToken(accessToken)
                 .build();
-        System.out.println(authHeader);
+        System.out.println("AUTH HEADER:");
+        System.out.println(authHeader.toJson());
 
         return authHeader;
     }
 
-    private static SingpassAuthHeader createPostAuthHeader(String code) throws Exception {
-        Random rand = SecureRandom.getInstance ("SHA1PRNG");
+    private static SingpassAuthHeader createPostAuthHeader(String code, String state) throws Exception {
+        Random rand = SecureRandom.getInstance("SHA1PRNG");
         long nonce = rand.nextLong();
         long timestamp = System.currentTimeMillis();
-        String baseString = generateBaseStringPost(nonce, timestamp, code);
+        String baseString = generateBaseStringPost(nonce, timestamp, code, state);
         String signature = sign(baseString);
-        System.out.println("BASE STRING: " + baseString);
-        System.out.println("SIGNATURE: " + signature);
 
         var authHeader = SingpassAuthHeader.builder()
                 .appId("STG2-SGVERIFY-SELF-TEST")
@@ -203,18 +221,32 @@ class Orrr {
 
     private static PrivateKey loadPrivateKey() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
-        // TODO zmienic path
         keyStore.load(new FileInputStream(""), "DemoApp".toCharArray());
         return (PrivateKey) keyStore.getKey("1", "DemoApp".toCharArray());
     }
 
-    private static String generateBaseStringPost(long nonce, long timestamp, String code) {
-        return "POST&" + TOKEN_URL + "&app_id=STG2-SGVERIFY-SELF-TEST&client_id=STG2-SGVERIFY-SELF-TEST&client_secret=WnBdUYAftjB8gLt4cjl1N01XulG1q7fn&code="+code+"&grant_typ" +
-                "e=authorization_code&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&timestamp=" + timestamp;
+    private static String generateBaseStringPost(long nonce, long timestamp, String code, String state) {
+        return "POST&" + TOKEN_URL +
+                "&app_id=STG2-SGVERIFY-SELF-TEST" +
+                "&client_id=STG2-SGVERIFY-SELF-TEST" +
+                "&client_secret=WnBdUYAftjB8gLt4cjl1N01XulG1q7fn" +
+                "&code=" + code +
+                "&grant_type=authorization_code" +
+                "&nonce=" + nonce +
+                "&redirect_uri=http://localhost:3001/callback" +
+                "&signature_method=RS256" +
+                "&state=" + state +
+                "&timestamp=" + timestamp;
     }
 
-    private static String generateBaseStringGet(String url, long nonce, long timestamp, String attributes) {
-        return "GET&" + url + "&app_id=STG2-SGVERIFY-SELF-TEST&attributes=" + attributes + "&client_id=STG2-SGVERIFY-SELF-TEST" +
-                "&nonce=" + nonce + "&redirect_uri=http://localhost:3001/callback&signature_method=RS256&timestamp=" + timestamp;
+    private static String generateBaseStringGet(String url, long nonce, long timestamp, String attributes, UUID txnNo) {
+        return "GET&" + url +
+                "&app_id=STG2-SGVERIFY-SELF-TEST" +
+                "&attributes=" + attributes +
+                "&client_id=STG2-SGVERIFY-SELF-TEST" +
+                "&nonce=" + nonce +
+                "&signature_method=RS256" +
+                "&timestamp=" + timestamp +
+                "&txnNo=" + txnNo;
     }
 }
